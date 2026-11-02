@@ -10,7 +10,7 @@ from typing import Any
 from .batch import error_result, local_now, run_batch
 from .config import DEFAULT_MODEL, DEFAULT_PROMPT, Config, get_api_key, get_model
 from .evaluation import evaluate, frequency_to_ghz  # re-export for existing callers
-from .openrouter_client import SUPPORTED_EXTS, call_vlm, is_payment_error
+from .openrouter_client import SUPPORTED_EXTS, call_vlm, batch_stop_reason
 from .report import LABELS, write_excel_report, write_json_result
 from .spec import Spec
 
@@ -64,24 +64,24 @@ def run_legacy(args: argparse.Namespace, config: Config) -> int:
         return 2
     output_dir = Path(args.output or "output")
     results = []
-    payment_error = None
+    stop_reason = None
     for file_path in files:
-        if payment_error is None:
+        if stop_reason is None:
             print(f"解析 {file_path} ...")
         started = time.perf_counter()
         inspected = local_now().isoformat()
         try:
-            if payment_error is not None:
-                result = error_result(file_path, config.model, "未檢驗：API 費用問題（HTTP 402），本批次已停止")
+            if stop_reason is not None:
+                result = error_result(file_path, config.model, f"未檢驗：{stop_reason}，本批次已停止")
                 result["skipped"] = True
             else:
                 result = process_file(config, spec, args.prompt, file_path)
         except Exception as exc:
-            if is_payment_error(exc):
-                payment_error = str(exc)
-                print("API 費用問題（HTTP 402）：停止後續檢驗，保存本次結果。")
+            stop_reason = batch_stop_reason(exc)
+            if stop_reason is not None:
+                print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
             result = error_result(file_path, config.model,
-                                  f"API 費用問題（HTTP 402）：{exc}" if payment_error else str(exc))
+                                  f"{stop_reason}：{exc}" if stop_reason else str(exc))
         result.update(elapsed_seconds=None if result.get("skipped") else round(time.perf_counter() - started, 2),
                       inspected_at=None if result.get("skipped") else inspected, spec_file=str(spec_path))
         relative = Path(file_path.name) if source.is_file() else file_path.relative_to(source)
@@ -99,7 +99,7 @@ def run_legacy(args: argparse.Namespace, config: Config) -> int:
             write_excel_report(results, excel_path)
         print(f"Excel 彙整報告：{excel_path}")
     print(f"完成：共 {len(results)} 個檔案。")
-    return 2 if payment_error is not None else 1 if any(result["overall"] != "PASS" for result in results) else 0
+    return 2 if stop_reason is not None else 1 if any(result["overall"] != "PASS" for result in results) else 0
 
 
 def main(argv: list[str] | None = None) -> int:

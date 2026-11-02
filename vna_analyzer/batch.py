@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .openrouter_client import SUPPORTED_EXTS, is_payment_error
+from .openrouter_client import SUPPORTED_EXTS, batch_stop_reason
 from .report import LABELS, write_excel_report, write_json_result
 from .spec import Spec
 
@@ -74,10 +74,10 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     batch_dir = workdir / "已完成" / local_now().strftime("%Y%m%d_%H%M%S_%f")
     batch_dir.mkdir(parents=True, exist_ok=False)
     results = []
-    payment_error = None
+    stop_reason = None
     for job in jobs:
-        if payment_error is not None:
-            result = error_result(job.source, config.model, "未檢驗：API 費用問題（HTTP 402），本批次已停止")
+        if stop_reason is not None:
+            result = error_result(job.source, config.model, f"未檢驗：{stop_reason}，本批次已停止")
             result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
                           spec_file=str(job.spec_path), inspected_at=None, elapsed_seconds=None, skipped=True)
             results.append(result)
@@ -93,11 +93,11 @@ def run_batch(workdir: Path, config: Config, prompt: str,
                 raise ValueError("原始檔在批次啟動後已變更，留待下次檢驗")
             result = process(config, spec, prompt, job.source)
         except Exception as exc:
-            if is_payment_error(exc):
-                payment_error = str(exc)
-                print("API 費用問題（HTTP 402）：停止後續檢驗，保存本次結果。")
+            stop_reason = batch_stop_reason(exc)
+            if stop_reason is not None:
+                print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
             result = error_result(job.source, config.model,
-                                  f"API 費用問題（HTTP 402）：{exc}" if payment_error else str(exc))
+                                  f"{stop_reason}：{exc}" if stop_reason else str(exc))
         result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
                       spec_file=str(job.spec_path), inspected_at=inspected_at,
                       elapsed_seconds=round(time.perf_counter() - started, 2))
@@ -157,4 +157,4 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     print(f"Excel 報告：{batch_dir / 'report.xlsx'}")
     counts = {status: sum(result["overall"] == status for result in results) for status in ("PASS", "FAIL", "REVIEW", "UNKNOWN")}
     print(f"完成：共 {len(results)} 個檔案，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
-    return 2 if payment_error is not None else 1 if any(counts[status] for status in ("FAIL", "REVIEW", "UNKNOWN")) else 0
+    return 2 if stop_reason is not None else 1 if any(counts[status] for status in ("FAIL", "REVIEW", "UNKNOWN")) else 0

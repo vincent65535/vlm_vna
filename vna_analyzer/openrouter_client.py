@@ -4,8 +4,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import mimetypes
 import re
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +27,39 @@ SUPPORTED_EXTS = IMAGE_EXTS | PDF_EXTS
 
 MAX_DIMENSION = 2048
 MAX_BYTES = 4 * 1024 * 1024
+RATE_LIMIT_DELAYS = (10, 20, 40)
 
 
 def is_payment_error(exc: Exception) -> bool:
     """HTTP 402 is fatal for the batch; do not retry later files."""
     return isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 402
+
+
+def batch_stop_reason(exc: Exception) -> str | None:
+    """A raised 429 has already exhausted the client's per-file retry budget."""
+    if is_payment_error(exc):
+        return "API 費用問題（HTTP 402）"
+    if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 429:
+        return "API 限流（HTTP 429），重試次數已耗盡"
+    return None
+
+
+def retry_delay(response: requests.Response, fallback: int) -> float:
+    """Honor Retry-After seconds or HTTP date; malformed headers use backoff."""
+    header = response.headers.get("Retry-After", "").strip()
+    try:
+        seconds = float(header)
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(header)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    except (ValueError, TypeError, OverflowError):
+        return float(fallback)
 
 
 def _downscale_image(path: Path) -> bytes:
@@ -103,11 +135,20 @@ def call_vlm(config: Config, prompt: str, image_paths: list[Path], model: str | 
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(config.api_url, headers=headers, json=payload, timeout=config.timeout)
-    if resp.status_code == 400 and "response_format" in payload:
-        # 部分模型不支援 response_format，移除後重試
-        payload.pop("response_format")
+    retries = 0
+    while True:
         resp = requests.post(config.api_url, headers=headers, json=payload, timeout=config.timeout)
+        if resp.status_code == 429 and retries < len(RATE_LIMIT_DELAYS):
+            delay = retry_delay(resp, RATE_LIMIT_DELAYS[retries])
+            retries += 1
+            print(f"API 限流（HTTP 429），{delay:g} 秒後重試（{retries}/{len(RATE_LIMIT_DELAYS)}）", flush=True)
+            time.sleep(delay)
+            continue
+        if resp.status_code == 400 and "response_format" in payload:
+            # Compatibility retry shares the same 429 budget; never reset it.
+            payload.pop("response_format")
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
     try:
