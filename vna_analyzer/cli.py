@@ -19,6 +19,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vna_analyzer", description="VNA 圖片/PDF 規格檢驗與 Excel 報告")
     parser.add_argument("path", nargs="?", help="既有模式：單一圖片/PDF 或資料夾；省略則使用工作目錄批次模式")
     parser.add_argument("--workdir", default=None, help=r"批次工作目錄（預設 C:\public）；不可與 path 同時使用")
+    parser.add_argument("--archive-policy", choices=("processed", "decided"), default=None,
+                        help="批次歸檔策略：processed（預設，所有已處理檔案）；decided（只歸檔合格／不合格）")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="自訂解析 prompt")
     parser.add_argument("--provider", choices=("openrouter", "nvidia"), default="openrouter")
     parser.add_argument("--model", default=None, help=f"覆蓋設定檔中的模型（OpenRouter 未設定時預設 {DEFAULT_MODEL}）")
@@ -30,6 +32,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.path and args.workdir is not None:
         parser.error("path 與 --workdir 不可同時使用")
+    if args.path and args.archive_policy is not None:
+        parser.error("--archive-policy 僅供工作目錄批次模式；指定路徑模式保留原檔")
+    args.archive_policy = args.archive_policy or "processed"
     if not args.path and (args.spec is not None or args.output is not None or args.excel is not None or args.no_excel):
         parser.error("工作目錄批次模式固定依型號選 spec 並保存 Excel；--spec/--output/--excel/--no-excel 僅供指定路徑模式")
     if args.timeout is not None and args.timeout <= 0:
@@ -82,6 +87,8 @@ def run_legacy(args: argparse.Namespace, config: Config) -> int:
                 print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
             result = error_result(file_path, config.model,
                                   f"{stop_reason}：{exc}" if stop_reason else str(exc))
+            if stop_reason is not None:
+                result["api_failed"] = True
         result.update(elapsed_seconds=None if result.get("skipped") else round(time.perf_counter() - started, 2),
                       inspected_at=None if result.get("skipped") else inspected, spec_file=str(spec_path))
         relative = Path(file_path.name) if source.is_file() else file_path.relative_to(source)
@@ -114,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.path:
             return run_legacy(args, config)
-        return run_batch(Path(args.workdir or r"C:\public"), config, args.prompt, process_file)
+        return run_batch(Path(args.workdir or r"C:\public"), config, args.prompt, process_file,
+                         archive_policy=args.archive_policy)
     except Exception as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 2

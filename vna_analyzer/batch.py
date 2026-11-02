@@ -57,7 +57,10 @@ def error_result(source: Path, model: str, message: str) -> dict[str, Any]:
 
 
 def run_batch(workdir: Path, config: Config, prompt: str,
-              process: Callable[[Config, Spec, str, Path], dict[str, Any]]) -> int:
+              process: Callable[[Config, Spec, str, Path], dict[str, Any]], *,
+              archive_policy: str = "processed") -> int:
+    if archive_policy not in ("processed", "decided"):
+        raise ValueError("archive_policy 必須為 processed 或 decided")
     workdir = workdir.expanduser().resolve()
     jobs = collect_jobs(workdir)
     if not jobs:
@@ -98,6 +101,8 @@ def run_batch(workdir: Path, config: Config, prompt: str,
                 print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
             result = error_result(job.source, config.model,
                                   f"{stop_reason}：{exc}" if stop_reason else str(exc))
+            if stop_reason is not None:
+                result["api_failed"] = True
         result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
                       spec_file=str(job.spec_path), inspected_at=inspected_at,
                       elapsed_seconds=round(time.perf_counter() - started, 2))
@@ -105,6 +110,7 @@ def run_batch(workdir: Path, config: Config, prompt: str,
         print(f"  {LABELS.get(result['overall'], '無法判定')}：{'；'.join(result.get('reasons') or [])}")
 
     # Recheck all sources after processing; changed or disappeared files never move.
+    archive_sources: set[Path] = set()
     for job, result in zip(jobs, results):
         try:
             unchanged = signature(job.source) == job.signature
@@ -113,7 +119,12 @@ def run_batch(workdir: Path, config: Config, prompt: str,
         if not unchanged:
             result["overall"] = "UNKNOWN"
             result.setdefault("reasons", []).append("原始檔在檢驗期間變更或消失，留待重試")
-        result["file_link"] = str(batch_dir / job.relative if result["overall"] in ("PASS", "FAIL") else job.source)
+        should_archive = (unchanged and not result.get("skipped") and not result.get("api_failed")
+                          and (archive_policy == "processed" or result["overall"] in ("PASS", "FAIL")))
+        if should_archive:
+            archive_sources.add(job.source)
+        result["archive_policy"] = archive_policy
+        result["file_link"] = str(batch_dir / job.relative if should_archive else job.source)
 
     def save_outputs() -> None:
         for job, result in zip(jobs, results):
@@ -125,7 +136,7 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     moved: list[tuple[Path, Path]] = []
     try:
         for job, result in zip(jobs, results):
-            if result["overall"] not in ("PASS", "FAIL"):
+            if job.source not in archive_sources:
                 continue
             if signature(job.source) != job.signature:
                 result["overall"] = "UNKNOWN"
