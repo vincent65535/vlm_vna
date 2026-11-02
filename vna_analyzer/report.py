@@ -13,12 +13,13 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-LABELS = {"PASS": "合格", "FAIL": "不合格", "UNKNOWN": "無法判定", "ERROR": "無法判定",
+LABELS = {"PASS": "合格", "FAIL": "不合格", "REVIEW": "待人工複判", "UNKNOWN": "無法判定", "ERROR": "無法判定",
           "NO_DATA": "無法判定", "NO_SPEC": "無規格"}
 JUDGMENT_STYLES = {"PASS": ("C6EFCE", "006100"), "FAIL": ("FFC7CE", "9C0006"),
+                   "REVIEW": ("FFE699", "9C5700"),
                    "UNKNOWN": ("FFE699", "9C5700"), "ERROR": ("FFE699", "9C5700"),
                    "NO_DATA": ("FFE699", "9C5700"), "NO_SPEC": ("E7E6E6", "595959")}
-SUMMARY_HEADERS = ["檢驗結果", "產品類別", "型號", "檔名", "不合格／無法判定原因", "使用的 spec", "檢驗時間", "處理耗時（秒）", "檔案連結"]
+SUMMARY_HEADERS = ["檢驗結果", "產品類別", "型號", "檔名", "不合格／複判／無法判定原因", "使用的 spec", "檢驗時間", "處理耗時（秒）", "檔案連結"]
 DETAIL_HEADERS = ["檔案整體結果", "產品類別", "型號", "檔名", "資料類型", "檢驗項目", "項目判定", "規格下限", "規格上限", "實測最小值", "實測最大值", "Marker 值", "單位", "備註"]
 
 
@@ -107,7 +108,8 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
                 _append(detail, identity + ["掃頻範圍", label, LABELS.get(judgment, "無法判定"),
                         required if key == "stop" else None, required if key == "start" else None,
                         None, None, frequency.get(f"{key}_ghz"), "GHz", frequency.get("note", "")], judgment)
-        for row_type, entries in (("整條曲線", result.get("trace_extrema") or []), ("Marker", result.get("measurements") or [])):
+        for row_type, entries in (("整條曲線", result.get("trace_extrema") or []), ("Marker", result.get("measurements") or []),
+                                  ("IL 局部凹陷", result.get("il_local_dips") or [])):
             for item in entries:
                 judgment = item.get("judgment", "UNKNOWN")
                 _append(detail, identity + [row_type, item["name"], LABELS.get(judgment, "無法判定"),

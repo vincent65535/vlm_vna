@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .spec import Spec, to_float
+from .il_review import evaluate_il_review
 
 FREQUENCY_TO_GHZ = {"hz": 1e-9, "khz": 1e-6, "mhz": 1e-3, "ghz": 1.0}
 
@@ -102,6 +103,13 @@ def evaluate(spec: Spec, raw: dict[str, Any]) -> dict[str, Any]:
             reasons.append(frequency["note"])
         frequency["judgment"] = "UNKNOWN" if incomplete else "FAIL" if not all(frequency[f"{key}_judgment"] == "PASS" for key in ("start", "stop")) else "PASS"
     overall = "UNKNOWN" if not judgments or "UNKNOWN" in judgments else "FAIL" if "FAIL" in judgments else "PASS"
+    spec_overall = overall
+    il_checks = evaluate_il_review(spec, raw)
+    review_required = any(item["judgment"] == "REVIEW" for item in il_checks)
+    reasons.extend(item["note"] for item in il_checks if item["judgment"] == "REVIEW")
+    if review_required and overall != "UNKNOWN":
+        overall = "REVIEW"
     return {"frequency": frequency, "measurements": measurements, "trace_extrema": traces,
+            "spec_overall": spec_overall, "il_local_dips": il_checks, "review_required": review_required,
             "overall": overall, "reasons": list(dict.fromkeys(reasons)), "raw_vlm": raw,
             "vlm_pass_fail": raw.get("vlm_pass_fail")}

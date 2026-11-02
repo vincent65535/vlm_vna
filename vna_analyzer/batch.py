@@ -155,6 +155,6 @@ def run_batch(workdir: Path, config: Config, prompt: str,
         print(f"歸檔失敗，請查看報告：{batch_dir / 'report.xlsx'}")
         return 2
     print(f"Excel 報告：{batch_dir / 'report.xlsx'}")
-    counts = {status: sum(result["overall"] == status for result in results) for status in ("PASS", "FAIL", "UNKNOWN")}
-    print(f"完成：共 {len(results)} 個檔案，合格 {counts['PASS']}，不合格 {counts['FAIL']}，無法判定 {counts['UNKNOWN']}。")
-    return 2 if payment_error is not None else 1 if counts["FAIL"] or counts["UNKNOWN"] else 0
+    counts = {status: sum(result["overall"] == status for result in results) for status in ("PASS", "FAIL", "REVIEW", "UNKNOWN")}
+    print(f"完成：共 {len(results)} 個檔案，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
+    return 2 if payment_error is not None else 1 if any(counts[status] for status in ("FAIL", "REVIEW", "UNKNOWN")) else 0
