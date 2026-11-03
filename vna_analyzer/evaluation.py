@@ -1,6 +1,7 @@
 """將辨識資料轉成可追溯的三態檢驗結果。"""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .spec import Spec, to_float
@@ -91,21 +92,35 @@ def evaluate(spec: Spec, raw: dict[str, Any]) -> dict[str, Any]:
         incomplete = start is None or stop is None or invalid_range
         for key, value, limit, ok in (
             ("start", start, spec.frequency_range.start_ghz, start is not None and start <= spec.frequency_range.start_ghz),
-            ("stop", stop, spec.frequency_range.stop_ghz, stop is not None and stop >= spec.frequency_range.stop_ghz),
+            ("stop", stop, spec.frequency_range.stop_ghz,
+             stop is not None and math.isclose(stop, spec.frequency_range.stop_ghz, rel_tol=1e-9, abs_tol=1e-12)),
         ):
-            judgment = "UNKNOWN" if value is None or invalid_range else "PASS" if ok else "FAIL"
+            judgment = "UNKNOWN" if value is None or invalid_range else "PASS" if ok else "REVIEW" if key == "stop" else "FAIL"
             frequency[f"{key}_judgment"] = judgment
-            judgments.append(judgment)
+            # Preserve the spec mismatch independently of the manual-review outcome.
+            judgments.append("FAIL" if judgment == "REVIEW" else judgment)
+            note = ""
+            if judgment == "REVIEW":
+                note = f"掃頻終點與 spec 不符：實際 {value:g} GHz，規格 stop_ghz = {limit:g} GHz，待人工複判"
             if judgment == "FAIL":
-                reasons.append(f"掃頻{'起點' if key == 'start' else '終點'}超規：{value} GHz，要求 {'≤' if key == 'start' else '≥'} {limit} GHz")
+                note = f"掃頻起點超規：{value} GHz，要求 ≤ {limit} GHz"
+            frequency[f"{key}_note"] = note
+            if note:
+                reasons.append(note)
+        frequency["note"] = "；".join(filter(None, (frequency["start_note"], frequency["stop_note"])))
         if incomplete:
-            frequency["note"] = "掃頻數據缺漏、單位無效或起終點順序錯誤"
-            reasons.append(frequency["note"])
-        frequency["judgment"] = "UNKNOWN" if incomplete else "FAIL" if not all(frequency[f"{key}_judgment"] == "PASS" for key in ("start", "stop")) else "PASS"
+            note = "掃頻數據缺漏、單位無效或起終點順序錯誤"
+            frequency["note"] = "；".join(filter(None, (frequency["note"], note)))
+            for key in ("start", "stop"):
+                if frequency[f"{key}_judgment"] == "UNKNOWN":
+                    frequency[f"{key}_note"] = note
+            reasons.append(note)
+        frequency["judgment"] = ("UNKNOWN" if incomplete else "REVIEW" if frequency["stop_judgment"] == "REVIEW"
+                                 else "FAIL" if frequency["start_judgment"] == "FAIL" else "PASS")
     overall = "UNKNOWN" if not judgments or "UNKNOWN" in judgments else "FAIL" if "FAIL" in judgments else "PASS"
     spec_overall = overall
     il_checks = evaluate_il_review(spec, raw)
-    review_required = any(item["judgment"] == "REVIEW" for item in il_checks)
+    review_required = frequency.get("stop_judgment") == "REVIEW" or any(item["judgment"] == "REVIEW" for item in il_checks)
     reasons.extend(item["note"] for item in il_checks if item["judgment"] == "REVIEW")
     if review_required and overall != "UNKNOWN":
         overall = "REVIEW"

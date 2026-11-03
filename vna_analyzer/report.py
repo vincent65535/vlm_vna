@@ -106,8 +106,9 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
                 judgment = frequency.get(f"{key}_judgment", frequency.get("judgment", "NO_SPEC"))
                 required = frequency.get(f"required_{key}_ghz")
                 _append(detail, identity + ["掃頻範圍", label, LABELS.get(judgment, "無法判定"),
-                        required if key == "stop" else None, required if key == "start" else None,
-                        None, None, frequency.get(f"{key}_ghz"), "GHz", frequency.get("note", "")], judgment)
+                        required if key == "stop" else None, required,
+                        None, None, frequency.get(f"{key}_ghz"), "GHz",
+                        frequency.get(f"{key}_note", frequency.get("note", ""))], judgment)
         for row_type, entries in (("整條曲線", result.get("trace_extrema") or []), ("Marker", result.get("measurements") or []),
                                   ("IL 局部凹陷", result.get("il_local_dips") or [])):
             for item in entries:
