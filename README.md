@@ -125,7 +125,8 @@ python -m vna_analyzer screenshot.png --prompt "幫我把這圖裡的右上角�
 - 每條 IL 曲線在 `il_local_dips` 回傳一筆：`name`、`status`（`DIP` 異常局部凹陷／`CLEAR` 無異常，包含可接受的緩變淺凹／`UNKNOWN` 無法確認）、`evidence`、`dips`。每個異常凹陷記錄 `start_ghz`、`bottom_ghz`、`end_ghz`、`depth_db`；無法可靠讀取的數值填 `null`。`CLEAR` 的 `dips` 為空，可接受低谷在 `evidence` 說明；缺少精確幅度或門檻本身不觸發 `UNKNOWN`。沒有 IL 或類型不明曲線時回傳空陣列。
 - 形狀校準：使用者確認的 050、051 為可接受的緩變淺凹，052 高頻端的集中下凹為需複判範例。這些是人工標記的驗證案例，程式不依檔名放行；marker 差值接近仍須依局部形狀區分。尚未設定數值化的形狀界線。
 - `DIP`、`UNKNOWN`、漏回必要檢查或矛盾資料均要求複判；儀器 PASS 與數值符合規格都不能覆蓋此標記。凹陷檢查依賴 VLM 的圖像觀察，並非從原始 S 參數計算；仍需用已確認的正常／凹陷圖驗證辨識品質。
-- JSON 的 `spec_overall` 保留原數值規格結果，`review_required` 表示是否需要人工複判，`il_local_dips` 保留逐條觀察與證據。需複判且數值資料完整時，`overall` 為 `REVIEW`（待人工複判），即使數值另有超規也保留超規原因；必要數值缺漏時仍為 `UNKNOWN`，同時保留複判標記。
+- 同張圖的整體結果優先順序為：`FAIL`（不合格）→ `UNKNOWN`（無法判定）→ `REVIEW`（待人工複判）→ `PASS`（合格）。只要任一項目判定不合格，整體即為不合格，其他複判項目及原因仍保留。掃頻終點不符本身只要求複判，不視為不合格項目。
+- JSON 的 `spec_overall` 保留規格項目的彙整結果，`review_required` 獨立表示是否需要人工複判，即使整體不合格仍可為 `true`；`il_local_dips` 保留逐條觀察與證據。
 - Excel 總表以黃色「待人工複判」顯示 `REVIEW`，明細新增「IL 局部凹陷」資料列，備註包含判讀證據、頻段及深度估計。此功能不會因凹陷直接判產品 NG。
 
 ## 規格檔格式（spec.json）

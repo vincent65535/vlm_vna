@@ -97,8 +97,7 @@ def evaluate(spec: Spec, raw: dict[str, Any]) -> dict[str, Any]:
         ):
             judgment = "UNKNOWN" if value is None or invalid_range else "PASS" if ok else "REVIEW" if key == "stop" else "FAIL"
             frequency[f"{key}_judgment"] = judgment
-            # Preserve the spec mismatch independently of the manual-review outcome.
-            judgments.append("FAIL" if judgment == "REVIEW" else judgment)
+            judgments.append(judgment)
             note = ""
             if judgment == "REVIEW":
                 note = f"掃頻終點與 spec 不符：實際 {value:g} GHz，規格 stop_ghz = {limit:g} GHz，待人工複判"
@@ -115,14 +114,15 @@ def evaluate(spec: Spec, raw: dict[str, Any]) -> dict[str, Any]:
                 if frequency[f"{key}_judgment"] == "UNKNOWN":
                     frequency[f"{key}_note"] = note
             reasons.append(note)
-        frequency["judgment"] = ("UNKNOWN" if incomplete else "REVIEW" if frequency["stop_judgment"] == "REVIEW"
-                                 else "FAIL" if frequency["start_judgment"] == "FAIL" else "PASS")
-    overall = "UNKNOWN" if not judgments or "UNKNOWN" in judgments else "FAIL" if "FAIL" in judgments else "PASS"
+        frequency["judgment"] = ("FAIL" if frequency["start_judgment"] == "FAIL" else "UNKNOWN" if incomplete
+                                 else "REVIEW" if frequency["stop_judgment"] == "REVIEW" else "PASS")
+    overall = ("FAIL" if "FAIL" in judgments else "UNKNOWN" if not judgments or "UNKNOWN" in judgments
+               else "REVIEW" if "REVIEW" in judgments else "PASS")
     spec_overall = overall
     il_checks = evaluate_il_review(spec, raw)
     review_required = frequency.get("stop_judgment") == "REVIEW" or any(item["judgment"] == "REVIEW" for item in il_checks)
     reasons.extend(item["note"] for item in il_checks if item["judgment"] == "REVIEW")
-    if review_required and overall != "UNKNOWN":
+    if review_required and overall == "PASS":
         overall = "REVIEW"
     return {"frequency": frequency, "measurements": measurements, "trace_extrema": traces,
             "spec_overall": spec_overall, "il_local_dips": il_checks, "review_required": review_required,
