@@ -80,7 +80,10 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
     summary.title = "檔案總表"
     detail = workbook.create_sheet("檢驗明細")
     _setup(summary, SUMMARY_HEADERS, [16, 16, 23, 27, 65, 55, 23, 19, 55])
-    _setup(detail, DETAIL_HEADERS, [18, 16, 23, 27, 16, 24, 16, 16, 16, 18, 18, 16, 12, 65])
+    has_source_reports = any(result.get("source_reports") for result in results)
+    detail_headers = DETAIL_HEADERS + (["來源測報連結"] if has_source_reports else [])
+    detail_widths = [18, 16, 23, 27, 16, 24, 16, 16, 16, 18, 18, 16, 12, 65]
+    _setup(detail, detail_headers, detail_widths + ([55] if has_source_reports else []))
     for result in results:
         overall = result.get("overall", "UNKNOWN")
         source = Path(result["source_file"])
@@ -100,8 +103,27 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
         summary.cell(summary.max_row, 9).hyperlink = link.as_uri()
         summary.cell(summary.max_row, 9).font = Font(name="Microsoft JhengHei", size=11, color="0563C1", underline="single")
         count_before = detail.max_row
-        frequency = result.get("frequency") or {}
-        if frequency:
+        sources = result.get("source_reports") or []
+        source_links = {entry["source_file"]: report_link(entry["file_link"]) for entry in sources}
+
+        def link_detail(source_file: str | None) -> None:
+            if source_file in source_links:
+                source_link = source_links[source_file]
+                cell = detail.cell(detail.max_row, 15, str(source_link))
+                cell.data_type = "s"
+                cell.hyperlink = source_link.as_uri()
+                cell.font = Font(name="Microsoft JhengHei", size=11, color="0563C1", underline="single")
+
+        for entry in sources:
+            instrument = entry.get("vlm_pass_fail")
+            _append(detail, identity + ["來源測報", entry.get("role") or "未辨識",
+                    LABELS["NO_SPEC"], None, None, None, None, None, None,
+                    f"儀器標記：{instrument}" if instrument is not None else ""], "NO_SPEC")
+            link_detail(entry["source_file"])
+        for entry in sources or [result]:
+            frequency = entry.get("frequency") or {}
+            if not frequency:
+                continue
             for key, label in (("start", "掃頻起點"), ("stop", "掃頻終點")):
                 judgment = frequency.get(f"{key}_judgment", frequency.get("judgment", "NO_SPEC"))
                 required = frequency.get(f"required_{key}_ghz")
@@ -109,6 +131,7 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
                         required if key == "stop" else None, required,
                         None, None, frequency.get(f"{key}_ghz"), "GHz",
                         frequency.get(f"{key}_note", frequency.get("note", ""))], judgment)
+                link_detail(entry["source_file"])
         for row_type, entries in (("整條曲線", result.get("trace_extrema") or []), ("Marker", result.get("measurements") or []),
                                   ("IL 局部凹陷", result.get("il_local_dips") or [])):
             for item in entries:
@@ -116,7 +139,8 @@ def write_excel_report(results: list[dict[str, Any]], path: Path) -> None:
                 _append(detail, identity + [row_type, item["name"], LABELS.get(judgment, "無法判定"),
                         item.get("spec_min"), item.get("spec_max"), item.get("min"), item.get("max"),
                         item.get("value"), item.get("unit"), item.get("note", "")], judgment)
-        if detail.max_row == count_before:
+                link_detail(item.get("source_file"))
+        if detail.max_row == count_before or (sources and result.get("error")):
             _append(detail, identity + ["處理異常", "檔案檢驗", "無法判定", None, None, None, None, None, None, reason], "UNKNOWN")
         # Column A is the file result even when a particular item passes.
         fill, color = JUDGMENT_STYLES.get(overall, JUDGMENT_STYLES["UNKNOWN"])

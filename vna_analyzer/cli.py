@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.path:
             return run_legacy(args, config)
         return run_batch(Path(args.workdir or r"C:\public"), config, args.prompt, process_file,
-                         archive_policy=args.archive_policy)
+                         archive_policy=args.archive_policy, read_vlm=call_vlm)
     except Exception as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 2

@@ -10,11 +10,20 @@ from typing import Any
 
 
 @dataclass
+class SpecBand:
+    start_ghz: float
+    stop_ghz: float
+    min: float | None
+    max: float | None
+
+
+@dataclass
 class SpecItem:
     name: str
     min: float | None
     max: float | None
     unit: str | None
+    bands: tuple[SpecBand, ...] = ()
 
 
 @dataclass
@@ -25,6 +34,40 @@ class FrequencyRange:
 
 def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _validate_limits(name: str, limits: dict[str, Any]) -> None:
+    for key in ("min", "max"):
+        value = limits.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+            raise ValueError(f"{name} 的 {key} 必須為有限數值")
+    if limits.get("min") is not None and limits.get("max") is not None and limits["min"] > limits["max"]:
+        raise ValueError(f"{name} 的下限不可大於上限")
+
+
+def _load_bands(name: str, limits: dict[str, Any]) -> tuple[SpecBand, ...]:
+    if "bands" not in limits:
+        return ()
+    bands = limits["bands"]
+    if not isinstance(bands, list) or not bands:
+        raise ValueError(f"{name} 的 bands 必須為非空陣列")
+    loaded = []
+    for band in bands:
+        if not isinstance(band, dict):
+            raise ValueError(f"{name} 分頻規格格式錯誤")
+        _validate_limits(name, band)
+        if band.get("min") is None and band.get("max") is None:
+            raise ValueError(f"{name} 分頻規格缺少上下限")
+        for key in ("start_ghz", "stop_ghz"):
+            value = band.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} 分頻 {key} 必須為有限數值")
+        if band["start_ghz"] < 0 or band["start_ghz"] >= band["stop_ghz"]:
+            raise ValueError(f"{name} 分頻範圍無效")
+        if loaded and not math.isclose(loaded[-1].stop_ghz, band["start_ghz"], rel_tol=1e-9, abs_tol=1e-12):
+            raise ValueError(f"{name} 分頻範圍必須依序連續且不可重疊")
+        loaded.append(SpecBand(band["start_ghz"], band["stop_ghz"], band.get("min"), band.get("max")))
+    return tuple(loaded)
 
 
 class Spec:
@@ -41,16 +84,12 @@ class Spec:
         for name, limits in data.get("measurements", {}).items():
             if not name.strip() or not isinstance(limits, dict):
                 raise ValueError("spec 量測名稱或規格格式錯誤")
-            for key in ("min", "max"):
-                value = limits.get(key)
-                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
-                    raise ValueError(f"{name} 的 {key} 必須為有限數值")
-            if limits.get("min") is not None and limits.get("max") is not None and limits["min"] > limits["max"]:
-                raise ValueError(f"{name} 的下限不可大於上限")
+            _validate_limits(name, limits)
             if not isinstance(limits.get("unit"), str) or not limits["unit"].strip():
                 raise ValueError(f"{name} 缺少有效單位")
         items = {
-            name: SpecItem(name=name, min=limits.get("min"), max=limits.get("max"), unit=limits.get("unit"))
+            name: SpecItem(name=name, min=limits.get("min"), max=limits.get("max"), unit=limits.get("unit"),
+                           bands=_load_bands(name, limits))
             for name, limits in data.get("measurements", {}).items()
         }
         range_data = data.get("frequency_range")
@@ -69,6 +108,11 @@ class Spec:
             raise ValueError("spec 掃頻範圍無效")
         if not items and frequency_range is None:
             raise ValueError("spec 沒有檢驗項目")
+        for item in items.values():
+            if item.bands and (frequency_range is None
+                    or not math.isclose(item.bands[0].start_ghz, frequency_range.start_ghz, rel_tol=1e-9, abs_tol=1e-12)
+                    or not math.isclose(item.bands[-1].stop_ghz, frequency_range.stop_ghz, rel_tol=1e-9, abs_tol=1e-12)):
+                raise ValueError(f"{item.name} 分頻規格必須涵蓋完整 spec 掃頻範圍")
         return cls(items, frequency_range)
 
     @property

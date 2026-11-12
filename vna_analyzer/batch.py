@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .openrouter_client import SUPPORTED_EXTS, batch_stop_reason
+from .divider import ISOLATION, MAIN, divider_filename, process_divider
+from .openrouter_client import SUPPORTED_EXTS, batch_stop_reason, call_vlm
 from .report import LABELS, write_excel_report, write_json_result
 from .spec import Spec
 
@@ -23,6 +24,17 @@ class Job:
     relative: Path
     spec_path: Path
     signature: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class Inspection:
+    jobs: tuple[Job, ...]
+    divider_id: str | None = None
+    pairing_error: str | None = None
+
+    @property
+    def is_divider(self) -> bool:
+        return self.jobs[0].relative.parts[0].casefold() == "divider"
 
 
 def signature(path: Path) -> tuple[int, int]:
@@ -56,19 +68,69 @@ def error_result(source: Path, model: str, message: str) -> dict[str, Any]:
             "reasons": [message], "frequency": {}, "measurements": [], "trace_extrema": [], "vlm_pass_fail": None}
 
 
+def group_inspections(jobs: list[Job]) -> list[Inspection]:
+    inspections = []
+    groups: dict[tuple[Path, str], list[tuple[Job, str | None, str | None]]] = {}
+    for job in jobs:
+        if job.relative.parts[0].casefold() != "divider":
+            inspections.append(Inspection((job,)))
+            continue
+        identifier, role, error = divider_filename(job.source)
+        if identifier is None:
+            inspections.append(Inspection((job,), pairing_error=f"{job.source.name}：{error}"))
+            continue
+        groups.setdefault((job.spec_path, identifier), []).append((job, role, error))
+    for (_, identifier), entries in groups.items():
+        errors = [f"{job.source.name}：{error}" for job, _, error in entries if error]
+        ordered = []
+        for role in (MAIN, ISOLATION):
+            matching = [job for job, kind, _ in entries if kind == role]
+            if not matching:
+                errors.append(f"缺少{role}")
+            elif len(matching) > 1:
+                errors.append(f"{role}重複（{len(matching)} 張）")
+            ordered.extend(matching)
+        ordered.extend(job for job, role, _ in entries if role is None)
+        inspections.append(Inspection(tuple(ordered), identifier, "；".join(errors) or None))
+    return sorted(inspections, key=lambda inspection: min(job.relative for job in inspection.jobs))
+
+
+def sources_unchanged(inspection: Inspection) -> bool:
+    try:
+        return all(signature(job.source) == job.signature for job in inspection.jobs)
+    except OSError:
+        return False
+
+
+def set_links(inspection: Inspection, result: dict[str, Any], locations: dict[Path, Path]) -> None:
+    result["file_link"] = str(locations[inspection.jobs[0].source])
+    if inspection.is_divider:
+        reports = {entry["source_file"]: entry for entry in result.get("source_reports", [])}
+        result["source_reports"] = []
+        for job in inspection.jobs:
+            source = str(job.source)
+            report = reports.get(source)
+            if report is None:
+                _, role, _ = divider_filename(job.source)
+                report = {"source_file": source, "role": role}
+            report["file_link"] = str(locations[job.source])
+            result["source_reports"].append(report)
+
+
 def run_batch(workdir: Path, config: Config, prompt: str,
               process: Callable[[Config, Spec, str, Path], dict[str, Any]], *,
-              archive_policy: str = "processed") -> int:
+              archive_policy: str = "processed", read_vlm=call_vlm) -> int:
     if archive_policy not in ("processed", "decided"):
         raise ValueError("archive_policy 必須為 processed 或 decided")
     workdir = workdir.expanduser().resolve()
-    jobs = collect_jobs(workdir)
-    if not jobs:
+    inspections = group_inspections(collect_jobs(workdir))
+    if not inspections:
         print("待檢驗目錄沒有支援的圖片或 PDF。")
         return 0
     # Load once before API work so every model uses one consistent spec this batch.
     specs: dict[Path, Spec | str] = {}
-    for job in jobs:
+    for inspection in inspections:
+        job = inspection.jobs[0]
         if job.spec_path not in specs:
             try:
                 specs[job.spec_path] = Spec.load(job.spec_path)
@@ -78,9 +140,13 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     batch_dir.mkdir(parents=True, exist_ok=False)
     results = []
     stop_reason = None
-    for job in jobs:
+    for inspection in inspections:
+        job = inspection.jobs[0]
         if stop_reason is not None:
-            result = error_result(job.source, config.model, f"未檢驗：{stop_reason}，本批次已停止")
+            message = f"未檢驗：{stop_reason}，本批次已停止"
+            if inspection.pairing_error:
+                message += f"；{inspection.pairing_error}"
+            result = error_result(job.source, config.model, message)
             result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
                           spec_file=str(job.spec_path), inspected_at=None, elapsed_seconds=None, skipped=True)
             results.append(result)
@@ -89,20 +155,26 @@ def run_batch(workdir: Path, config: Config, prompt: str,
         started = time.perf_counter()
         inspected_at = local_now().isoformat()
         try:
+            if inspection.pairing_error:
+                raise ValueError(inspection.pairing_error)
             spec = specs[job.spec_path]
             if isinstance(spec, str):
                 raise ValueError(spec)
-            if signature(job.source) != job.signature:
+            if not sources_unchanged(inspection):
                 raise ValueError("原始檔在批次啟動後已變更，留待下次檢驗")
-            result = process(config, spec, prompt, job.source)
+            if inspection.is_divider:
+                result = process_divider(config, spec, job.source, inspection.jobs[1].source, read_vlm=read_vlm)
+                stop_reason = result.pop("stop_reason", None)
+            else:
+                result = process(config, spec, prompt, job.source)
         except Exception as exc:
             stop_reason = batch_stop_reason(exc)
-            if stop_reason is not None:
-                print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
             result = error_result(job.source, config.model,
                                   f"{stop_reason}：{exc}" if stop_reason else str(exc))
             if stop_reason is not None:
                 result["api_failed"] = True
+        if stop_reason is not None:
+            print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
         result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
                       spec_file=str(job.spec_path), inspected_at=inspected_at,
                       elapsed_seconds=round(time.perf_counter() - started, 2))
@@ -110,24 +182,27 @@ def run_batch(workdir: Path, config: Config, prompt: str,
         print(f"  {LABELS.get(result['overall'], '無法判定')}：{'；'.join(result.get('reasons') or [])}")
 
     # Recheck all sources after processing; changed or disappeared files never move.
-    archive_sources: set[Path] = set()
-    for job, result in zip(jobs, results):
-        try:
-            unchanged = signature(job.source) == job.signature
-        except OSError:
-            unchanged = False
+    archive_units: set[Inspection] = set()
+    for inspection, result in zip(inspections, results):
+        unchanged = sources_unchanged(inspection)
         if not unchanged:
             result["overall"] = "UNKNOWN"
             result.setdefault("reasons", []).append("原始檔在檢驗期間變更或消失，留待重試")
         should_archive = (unchanged and not result.get("skipped") and not result.get("api_failed")
+                          and not inspection.pairing_error and not result.get("keep_pending")
                           and (archive_policy == "processed" or result["overall"] in ("PASS", "FAIL")))
         if should_archive:
-            archive_sources.add(job.source)
+            archive_units.add(inspection)
         result["archive_policy"] = archive_policy
-        result["file_link"] = str(batch_dir / job.relative if should_archive else job.source)
+        if inspection.is_divider:
+            result["divider_id"] = inspection.divider_id
+        set_links(inspection, result, {
+            job.source: batch_dir / job.relative if should_archive else job.source for job in inspection.jobs
+        })
 
     def save_outputs() -> None:
-        for job, result in zip(jobs, results):
+        for inspection, result in zip(inspections, results):
+            job = inspection.jobs[0]
             write_json_result(batch_dir / "JSON" / job.relative.parent, job.source.name, result)
         write_excel_report(results, batch_dir / "report.xlsx")
 
@@ -135,22 +210,28 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     save_outputs()
     moved: list[tuple[Path, Path]] = []
     try:
-        for job, result in zip(jobs, results):
-            if job.source not in archive_sources:
+        for inspection, result in zip(inspections, results):
+            if inspection not in archive_units:
                 continue
-            if signature(job.source) != job.signature:
+            if not sources_unchanged(inspection):
                 result["overall"] = "UNKNOWN"
                 result.setdefault("reasons", []).append("原始檔在歸檔前變更，留待重試")
-                raise OSError(f"原始檔已變更：{job.source}")
-            target = batch_dir / job.relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                raise FileExistsError(str(target))
-            job.source.rename(target)
-            moved.append((job.source, target))
+                raise OSError(f"原始檔已變更：{inspection.jobs[0].source}")
+            for job in inspection.jobs:
+                target = batch_dir / job.relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    raise FileExistsError(str(target))
+                job.source.rename(target)
+                moved.append((job.source, target))
+            if inspection.is_divider and any(signature(batch_dir / job.relative) != job.signature for job in inspection.jobs):
+                result["overall"] = "UNKNOWN"
+                result.setdefault("reasons", []).append("原始檔在歸檔期間變更，留待重試")
+                raise OSError(f"原始檔已變更：{inspection.jobs[0].source}")
     except OSError as exc:
         # Roll back completed renames and correct links to each actual location.
         recovery_errors = []
+        unrecovered = {}
         for source, target in reversed(moved):
             try:
                 if source.exists():
@@ -158,14 +239,16 @@ def run_batch(workdir: Path, config: Config, prompt: str,
                 target.rename(source)
             except OSError as recovery:
                 recovery_errors.append(str(recovery))
-        for job, result in zip(jobs, results):
-            target = batch_dir / job.relative
-            result["file_link"] = str(target if target.exists() else job.source)
+                if target.exists():
+                    unrecovered[source] = target
+        for inspection, result in zip(inspections, results):
+            set_links(inspection, result, {job.source: unrecovered.get(job.source, job.source) for job in inspection.jobs})
             result["archive_error"] = f"歸檔失敗：{exc}" + (f"；還原異常：{'；'.join(recovery_errors)}" if recovery_errors else "；已還原移動")
         save_outputs()
         print(f"歸檔失敗，請查看報告：{batch_dir / 'report.xlsx'}")
         return 2
     print(f"Excel 報告：{batch_dir / 'report.xlsx'}")
     counts = {status: sum(result["overall"] == status for result in results) for status in ("PASS", "FAIL", "REVIEW", "UNKNOWN")}
-    print(f"完成：共 {len(results)} 個檔案，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
+    unit = "個檢驗單位" if any(inspection.is_divider for inspection in inspections) else "個檔案"
+    print(f"完成：共 {len(results)} {unit}，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
     return 2 if stop_reason is not None else 1 if any(counts[status] for status in ("FAIL", "REVIEW", "UNKNOWN")) else 0

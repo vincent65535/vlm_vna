@@ -12,7 +12,7 @@ def _key(name: str) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", name.casefold())
 
 
-def evaluate_il_review(spec: Spec, raw: dict[str, Any]) -> list[dict[str, Any]]:
+def evaluate_il_review(spec: Spec, raw: dict[str, Any], *, trace_name: str | None = None) -> list[dict[str, Any]]:
     expected: dict[str, str] = {}
     uncertain: set[str] = set()
     candidates = [vars(item) for item in spec.items] + (raw.get("trace_extrema") or [])
@@ -22,11 +22,13 @@ def evaluate_il_review(spec: Spec, raw: dict[str, Any]) -> list[dict[str, Any]]:
         kind = str(trace.get("measurement_type") or "").upper()
         transmission = key in {"s21", "s12"} and str(trace.get("unit") or "").strip().casefold() == "db"
         labelled_il = bool(re.search(r"(?i)(?:^|[^a-z])IL(?:$|[^a-z])|insertion\s*loss|插入損耗", name))
-        if name and (transmission or labelled_il or kind in {"IL", "UNKNOWN"}):
+        if name and (name == trace_name if trace_name else transmission or labelled_il or kind in {"IL", "UNKNOWN"}):
             expected[key] = name
         if kind == "UNKNOWN":
             uncertain.add(key)
 
+    if trace_name:
+        expected[_key(trace_name)] = trace_name
     checks: list[dict[str, Any]] = []
 
     def add(name: str, status: str, evidence: str, dips: list[Any]) -> None:
