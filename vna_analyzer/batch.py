@@ -140,46 +140,52 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     batch_dir.mkdir(parents=True, exist_ok=False)
     results = []
     stop_reason = None
-    for inspection in inspections:
-        job = inspection.jobs[0]
-        if stop_reason is not None:
-            message = f"未檢驗：{stop_reason}，本批次已停止"
-            if inspection.pairing_error:
-                message += f"；{inspection.pairing_error}"
-            result = error_result(job.source, config.model, message)
-            result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
-                          spec_file=str(job.spec_path), inspected_at=None, elapsed_seconds=None, skipped=True)
-            results.append(result)
-            continue
-        print(f"檢驗 {job.relative} ...")
-        started = time.perf_counter()
-        inspected_at = local_now().isoformat()
-        try:
-            if inspection.pairing_error:
-                raise ValueError(inspection.pairing_error)
-            spec = specs[job.spec_path]
-            if isinstance(spec, str):
-                raise ValueError(spec)
-            if not sources_unchanged(inspection):
-                raise ValueError("原始檔在批次啟動後已變更，留待下次檢驗")
-            if inspection.is_divider:
-                result = process_divider(config, spec, job.source, inspection.jobs[1].source, read_vlm=read_vlm)
-                stop_reason = result.pop("stop_reason", None)
-            else:
-                result = process(config, spec, prompt, job.source)
-        except Exception as exc:
-            stop_reason = batch_stop_reason(exc)
-            result = error_result(job.source, config.model,
-                                  f"{stop_reason}：{exc}" if stop_reason else str(exc))
+    interrupted = False
+    try:
+        for inspection in inspections:
+            job = inspection.jobs[0]
             if stop_reason is not None:
-                result["api_failed"] = True
-        if stop_reason is not None:
-            print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
-        result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
-                      spec_file=str(job.spec_path), inspected_at=inspected_at,
-                      elapsed_seconds=round(time.perf_counter() - started, 2))
-        results.append(result)
-        print(f"  {LABELS.get(result['overall'], '無法判定')}：{'；'.join(result.get('reasons') or [])}")
+                message = f"未檢驗：{stop_reason}，本批次已停止"
+                if inspection.pairing_error:
+                    message += f"；{inspection.pairing_error}"
+                result = error_result(job.source, config.model, message)
+                result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
+                              spec_file=str(job.spec_path), inspected_at=None, elapsed_seconds=None, skipped=True)
+                results.append(result)
+                continue
+            print(f"檢驗 {job.relative} ...")
+            started = time.perf_counter()
+            inspected_at = local_now().isoformat()
+            try:
+                if inspection.pairing_error:
+                    raise ValueError(inspection.pairing_error)
+                spec = specs[job.spec_path]
+                if isinstance(spec, str):
+                    raise ValueError(spec)
+                if not sources_unchanged(inspection):
+                    raise ValueError("原始檔在批次啟動後已變更，留待下次檢驗")
+                if inspection.is_divider:
+                    result = process_divider(config, spec, job.source, inspection.jobs[1].source, read_vlm=read_vlm)
+                    stop_reason = result.pop("stop_reason", None)
+                else:
+                    result = process(config, spec, prompt, job.source)
+            except Exception as exc:
+                stop_reason = batch_stop_reason(exc)
+                result = error_result(job.source, config.model,
+                                      f"{stop_reason}：{exc}" if stop_reason else str(exc))
+                if stop_reason is not None:
+                    result["api_failed"] = True
+            if stop_reason is not None:
+                print(f"{stop_reason}：停止後續檢驗，保存本次結果。")
+            result.update(category=job.relative.parts[0], product_model=job.relative.parts[1],
+                          spec_file=str(job.spec_path), inspected_at=inspected_at,
+                          elapsed_seconds=round(time.perf_counter() - started, 2))
+            results.append(result)
+            print(f"  {LABELS.get(result['overall'], '無法判定')}：{'；'.join(result.get('reasons') or [])}")
+
+    except KeyboardInterrupt:
+        interrupted = True
+        print("收到 Ctrl+C：停止後續檢驗，保存已取得的結果。")
 
     # Recheck all sources after processing; changed or disappeared files never move.
     archive_units: set[Inspection] = set()
@@ -250,5 +256,8 @@ def run_batch(workdir: Path, config: Config, prompt: str,
     print(f"Excel 報告：{batch_dir / 'report.xlsx'}")
     counts = {status: sum(result["overall"] == status for result in results) for status in ("PASS", "FAIL", "REVIEW", "UNKNOWN")}
     unit = "個檢驗單位" if any(inspection.is_divider for inspection in inspections) else "個檔案"
-    print(f"完成：共 {len(results)} {unit}，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
+    summary_label = "中斷前已保存" if interrupted else "完成"
+    print(f"{summary_label}：共 {len(results)} {unit}，合格 {counts['PASS']}，不合格 {counts['FAIL']}，待人工複判 {counts['REVIEW']}，無法判定 {counts['UNKNOWN']}。")
+    if interrupted:
+        return 130
     return 2 if stop_reason is not None else 1 if any(counts[status] for status in ("FAIL", "REVIEW", "UNKNOWN")) else 0
